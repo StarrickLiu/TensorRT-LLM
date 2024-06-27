@@ -33,7 +33,7 @@ def get_compute_cap():
 
 
 def get_csv_filename(model, dtype, tp_size, mode, **kwargs):
-    sm = get_compute_cap()
+    sm = "sm80"
     if len(kwargs) == 0:
         kw_pairs = ""
     else:
@@ -181,7 +181,8 @@ class BaseBenchmark(object):
         report_dict["world_size"] = self.world_size
         report_dict["precision"] = self.dtype
         report_dict["quantization"] = str(self.quant_mode)
-        report_dict["compute_cap"] = "sm" + get_compute_cap()
+        # report_dict["compute_cap"] = "sm" + get_compute_cap()
+        report_dict["compute_cap"] = "sm80"
         return report_dict
 
     def get_csv_filename(self):

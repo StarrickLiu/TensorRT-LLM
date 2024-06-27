@@ -44,6 +44,8 @@ from .phi3.phi3small.model import Phi3SmallForCausalLM, Phi3SmallModel
 from .phi.model import PhiForCausalLM, PhiModel
 from .qwen.model import QWenForCausalLM
 from .recurrentgemma.model import RecurrentGemmaForCausalLM
+from .xverse.model import XverseConfig, XverseForCausalLM
+
 
 __all__ = [
     'BertModel',
@@ -94,6 +96,8 @@ __all__ = [
     'CogVLMConfig',
     'CogVLMForCausalLM',
     'SpeculativeDecodingMode',
+    'XverseConfig',
+    'XverseForCausalLM',
 ]
 
 MODEL_MAP = {
@@ -121,6 +125,7 @@ MODEL_MAP = {
     'SkyworkForCausalLM': LLaMAForCausalLM,
     'GemmaForCausalLM': GemmaForCausalLM,
     'QWenForCausalLM': QWenForCausalLM,
+    'XverseForCausalLM': XverseForCausalLM,
     'WhisperEncoder': WhisperEncoder,
     'EncoderModel': EncoderModel,
     'DecoderModel': DecoderModel,
