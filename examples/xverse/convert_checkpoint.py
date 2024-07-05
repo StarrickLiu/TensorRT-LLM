@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,6 +16,8 @@ from tensorrt_llm.models.xverse.convert import (load_hf_xverse,
 from tensorrt_llm.models.modeling_utils import QuantConfig
 from tensorrt_llm.quantization import QuantAlgo
 
+import faulthandler
+faulthandler.enable()
 
 def parse_arguments():
     parser = argparse.ArgumentParser()
@@ -302,7 +305,7 @@ def convert_and_save_hf(args):
     # before the refactor is done.
     override_fields = {}
     override_fields.update(args_to_build_options(args))
-
+    # print(override_fields)
     quant_config = args_to_quant_config(args)
 
     if args.smoothquant is not None or args.int8_kv_cache:
@@ -321,8 +324,7 @@ def convert_and_save_hf(args):
                                   dtype=args.dtype,
                                   mapping=mapping,
                                   quant_config=quant_config,
-                                  calib_dataset=args.calib_dataset,
-                                  **override_fields)
+                                  calib_dataset=args.calib_dataset)
     else:
         # When not loading by shard, preload one complete model and then slice per rank weights from this
         # this saves the disk reloading time

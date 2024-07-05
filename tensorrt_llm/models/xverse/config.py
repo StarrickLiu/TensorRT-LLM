@@ -97,6 +97,7 @@ class XverseConfig(PretrainedConfig):
         rotary_base = getattr(hf_config, "rope_theta", 10000.0)
 
         moe_normalization_mode = MoeConfig.ExpertScaleNormalizationMode.RENORMALIZE
+        # moe_normalization_mode = MoeConfig.ExpertScaleNormalizationMode.NONE
         moe_num_experts = getattr(hf_config, "num_experts", 0)
         moe_top_k = getattr(hf_config, "moe_top_k", 0)
         num_shared_experts = getattr(hf_config, "num_shared_experts", 0)

@@ -1,8 +1,8 @@
-# LLaMA
+# XVERSE
 
-This document shows how to build and run a LLaMA model in TensorRT-LLM on both single GPU, single node multi-GPU and multi-node multi-GPU.
+This document shows how to build and run a XVERSE model in TensorRT-LLM on both single GPU, single node multi-GPU and multi-node multi-GPU.
 
-- [LLaMA](#llama)
+- [XVERSE](#xverse)
   - [Overview](#overview)
   - [Support Matrix](#support-matrix)
   - [Usage](#usage)
@@ -33,9 +33,9 @@ This document shows how to build and run a LLaMA model in TensorRT-LLM on both s
 
 ## Overview
 
-The TensorRT-LLM LLaMA implementation can be found in [tensorrt_llm/models/llama/model.py](../../tensorrt_llm/models/llama/model.py). The TensorRT-LLM LLaMA example code is located in [`examples/llama`](./). There is one main file:
+The TensorRT-LLM XVERSE implementation can be found in [tensorrt_llm/models/xverse/model.py](../../tensorrt_llm/models/xverse/model.py). The TensorRT-LLM LLaMA example code is located in [`examples/xverse`](./). There is one main file:
 
-* [`convert_checkpoint.py`](./convert_checkpoint.py) to convert the LLaMA model into tensorrt-llm checkpoint format.
+* [`convert_checkpoint.py`](./convert_checkpoint.py) to convert the XVERSE model into tensorrt-llm checkpoint format.
 
 In addition, there are two shared files in the parent folder [`examples`](../) for inference and evaluation:
 
@@ -43,19 +43,16 @@ In addition, there are two shared files in the parent folder [`examples`](../) f
 * [`../summarize.py`](../summarize.py) to summarize the articles in the [cnn_dailymail](https://huggingface.co/datasets/cnn_dailymail) dataset.
 
 ## Support Matrix
-  * FP16
-  * FP8
-  * INT8 & INT4 Weight-Only
-  * SmoothQuant
-  * Groupwise quantization (AWQ/GPTQ)
-  * FP8 KV CACHE
-  * INT8 KV CACHE (+ AWQ/per-channel weight-only)
-  * Tensor Parallel
-  * STRONGLY TYPED
+|   Model Name           | FP16/BF16  |  FP8  |  WO   |  AWQ  | GPTQ  |  SQ   |  TP   |  PP   |  Arch   |
+| :----------------:     |   :---:    | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :-----: |
+| XVERSE-7B(-Chat)       |     Y      |   Y   |   Y   |   Y   |   Y   |   Y   |   Y   |   Y   | Ampere+ |
+| XVERSE-13B(-Chat)      |     Y      |   Y   |   Y   |   Y*  |   Y   |   Y   |   Y   |   Y   | Ampere+ |
+| XVERSE-65B(-Chat)      |     Y      |   Y   |   Y   |   Y*  |   Y   |   Y   |   Y   |   Y   | Ampere+ |
+| XVERSE-MoE-A4.2B(-Chat)|     Y      |   -   |   Y   |   -   |   -   |   -   |   Y   |   Y   | Ampere+ |
 
 ## Usage
 
-The TensorRT-LLM LLaMA example code locates at [examples/llama](./). It takes HF weights as input, and builds the corresponding TensorRT engines. The number of TensorRT engines depends on the number of GPUs used to run inference.
+The TensorRT-LLM XVERSE example code locates at [examples/xverse](./). It takes HF weights as input, and builds the corresponding TensorRT engines. The number of TensorRT engines depends on the number of GPUs used to run inference.
 
 ### Build TensorRT engine(s)
 
@@ -65,7 +62,7 @@ Please install required packages first to make sure the example uses matched `te
 pip install -r requirements.txt
 ```
 
-Need to prepare the HF LLaMA checkpoint by following the guides here https://huggingface.co/docs/transformers/main/en/model_doc/llama.
+Need to prepare the HF XVERSE checkpoint by following the guides here https://huggingface.co/docs/transformers/main/en/model_doc/llama.
 
 The `trtllm-build` command builds TensorRT engine(s) from HF checkpoint. If no checkpoint directory is specified, TensorRT-LLM will build engine(s) with dummy weights.
 

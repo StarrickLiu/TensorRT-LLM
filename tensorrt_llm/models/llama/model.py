@@ -382,7 +382,6 @@ class LLaMAForCausalLM(DecoderModelForCausalLM):
                                                mapping=mapping,
                                                quant_config=quant_config,
                                                **kwargs)
-
         if quant_config.quant_algo in DEFAULT_MODELOPT_FLOW:
             super().quantize(hf_model_dir,
                              output_dir,

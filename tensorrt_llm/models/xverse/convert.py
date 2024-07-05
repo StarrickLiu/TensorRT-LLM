@@ -17,10 +17,12 @@ import functools
 import json
 import os
 import sys
+import threading
 import time
 from collections import defaultdict
 from pathlib import Path
 from typing import List, Optional
+import pdb
 
 import numpy as np
 import safetensors
@@ -139,6 +141,256 @@ def generate_int8(weights, act_range, is_qkv=False, multi_query_mode=False):
         "scale_y_accum_quant.col": scale_y_accum_quant_c.to(torch.float32),
         "scale_y_quant_orig": scale_y_quant_orig_t.to(torch.float32),
     }
+
+
+
+@torch.no_grad()
+def apply_smoothing(scales,
+                    gemm_weights,
+                    layernorm_weights=None,
+                    layernorm_bias=None,
+                    dtype=torch.float32,
+                    layernorm_1p=False):
+    if not isinstance(gemm_weights, list):
+        gemm_weights = [gemm_weights]
+
+    if layernorm_weights is not None:
+        assert layernorm_weights.numel() == scales.numel()
+        layernorm_weights.div_(scales).to(dtype)
+    if layernorm_bias is not None:
+        assert layernorm_bias.numel() == scales.numel()
+        layernorm_bias.div_(scales).to(dtype)
+    if layernorm_1p:
+        layernorm_weights += (1 / scales) - 1
+
+    for gemm in gemm_weights:
+        gemm.mul_(scales.view(1, -1)).to(dtype)
+
+
+@torch.no_grad()
+def smooth_gemm(gemm_weights,
+                act_scales,
+                layernorm_weights=None,
+                layernorm_bias=None,
+                alpha=0.5,
+                weight_scales=None):
+    if not isinstance(gemm_weights, list):
+        gemm_weights = [gemm_weights]
+    orig_dtype = gemm_weights[0].dtype
+
+    for gemm in gemm_weights:
+        # gemm_weights are expected to be transposed
+        assert gemm.shape[1] == act_scales.numel()
+
+    if weight_scales is None:
+        weight_scales = torch.cat(
+            [gemm.abs().max(dim=0, keepdim=True)[0] for gemm in gemm_weights],
+            dim=0)
+        weight_scales = weight_scales.max(dim=0)[0]
+    weight_scales.to(float).clamp(min=1e-5)
+    scales = (act_scales.to(gemm_weights[0].device).to(float).pow(alpha) /
+              weight_scales.pow(1 - alpha)).clamp(min=1e-5)
+
+    apply_smoothing(scales, gemm_weights, layernorm_weights, layernorm_bias,
+                    orig_dtype)
+
+    return scales
+
+
+@torch.no_grad()
+def smooth_gemm_fc1_gate(fc1_weights,
+                         gate_weights,
+                         act_scales,
+                         layernorm_weights=None,
+                         layernorm_bias=None,
+                         alpha=0.5,
+                         weight_scales=None):
+    gemm_weights = []
+    if not isinstance(fc1_weights, list):
+        fc1_weights = [fc1_weights]
+    if not isinstance(gate_weights, list):
+        gate_weights = [gate_weights]
+
+    for i in range(len(fc1_weights)):
+        gemm_weight = torch.cat([fc1_weights[i], gate_weights[i]], dim=0)
+        gemm_weights.append(gemm_weight)
+
+    orig_dtype = gemm_weights[0].dtype
+
+    for gemm in gemm_weights:
+        # gemm_weights are expected to be transposed
+        assert gemm.shape[1] == act_scales.numel()
+
+    if weight_scales is None:
+        weight_scales = torch.cat(
+            [gemm.abs().max(dim=0, keepdim=True)[0] for gemm in gemm_weights],
+            dim=0)
+        weight_scales = weight_scales.max(dim=0)[0]
+    weight_scales.to(float).clamp(min=1e-5)
+    scales = (act_scales.to(gemm_weights[0].device).to(float).pow(alpha) /
+              weight_scales.pow(1 - alpha)).clamp(min=1e-5)
+
+    apply_smoothing(scales, fc1_weights + gate_weights, layernorm_weights,
+                    layernorm_bias, orig_dtype)
+
+    return scales
+
+
+@torch.no_grad()
+def smooth_xverse_model(model, scales, alpha, xverse_qkv_para, xverse_smoother):
+    # Smooth the activation and weights with smoother = $\diag{s}$
+    for name, module in model.named_modules():
+        # TODO: 补充其他模型的命名
+        if not module._get_name() == "XverseMoEDecoderLayer":
+            continue
+        # qkv_proj
+        layer_name_q = name + ".self_attn.q_proj"
+        layer_name_k = name + ".self_attn.k_proj"
+        layer_name_v = name + ".self_attn.v_proj"
+        layer_name_qkv = name + ".self_attn.qkv_proj"
+
+        weight = torch.cat([
+            module.self_attn.q_proj.weight, module.self_attn.k_proj.weight,
+            module.self_attn.v_proj.weight
+        ],
+                           dim=0)
+
+        smoother = smooth_gemm(weight, scales[layer_name_q]["x"],
+                               module.input_layernorm.weight, None, alpha)
+
+        scales[layer_name_qkv]["x"] = scales[layer_name_q]["x"] / smoother
+        scales[layer_name_qkv]["w"] = weight.abs().max(dim=1)[0]
+        scales[layer_name_qkv]["y"] = torch.cat([
+            scales[layer_name_q]["y"], scales[layer_name_k]["y"],
+            scales[layer_name_v]["y"]
+        ],
+                                                dim=0)
+
+        # see transpose_weights function
+        xverse_qkv_para[layer_name_qkv] = weight.transpose(0, 1)
+
+        # =================================================================
+        layer_name = name + ".self_attn.o_proj"
+        smoother = smooth_gemm(module.self_attn.o_proj.weight,
+                               scales[layer_name]["x"], None, None, alpha)
+        xverse_smoother[layer_name] = smoother.float()
+
+        scales[layer_name]["x"] = scales[layer_name]["x"] / smoother
+        scales[layer_name]["w"] = module.self_attn.o_proj.weight.abs().max(
+            dim=1)[0]
+
+        # ==================================================================
+        fc1_layer_name = name + ".mlp.gate_proj"
+        gate_layer_name = name + ".mlp.up_proj"
+
+        smoother = smooth_gemm_fc1_gate(module.mlp.gate_proj.weight,
+                                        module.mlp.up_proj.weight,
+                                        scales[fc1_layer_name]["x"],
+                                        module.post_attention_layernorm.weight,
+                                        None, alpha)
+
+        scales[fc1_layer_name]["x"] = scales[fc1_layer_name]["x"] / smoother
+        scales[fc1_layer_name]["w"] = module.mlp.gate_proj.weight.abs().max(
+            dim=1)[0]
+
+        scales[gate_layer_name]["x"] = scales[gate_layer_name]["x"] / smoother
+        scales[gate_layer_name]["w"] = module.mlp.up_proj.weight.abs().max(
+            dim=1)[0]
+
+        # ==================================================================
+        layer_name = name + ".mlp.down_proj"
+        smoother = smooth_gemm(module.mlp.down_proj.weight,
+                               scales[layer_name]["x"], None, None, alpha)
+        xverse_smoother[layer_name] = smoother.float()
+        scales[layer_name]["x"] = scales[layer_name]["x"] / smoother
+        scales[layer_name]["w"] = module.mlp.down_proj.weight.abs().max(
+            dim=1)[0]
+
+        # ==================================================================
+        if hasattr(module, 'residual_mlp'):
+            fc1_layer_name = name + ".residual_mlp.w1"
+            gate_layer_name = name + ".residual_mlp.w3"
+
+            smoother = smooth_gemm_fc1_gate(module.residual_mlp.w1.weight,
+                                            module.residual_mlp.w3.weight,
+                                            scales[fc1_layer_name]["x"],
+                                            module.residual_layernorm.weight,
+                                            None, alpha)
+
+            scales[fc1_layer_name]["x"] = scales[fc1_layer_name]["x"] / smoother
+            scales[fc1_layer_name]["w"] = module.residual_mlp.w1.weight.abs(
+            ).max(dim=1)[0]
+
+            scales[gate_layer_name][
+                "x"] = scales[gate_layer_name]["x"] / smoother
+            scales[gate_layer_name]["w"] = module.residual_mlp.w3.weight.abs(
+            ).max(dim=1)[0]
+
+            # ==================================================================
+            layer_name = name + ".residual_mlp.w2"
+            smoother = smooth_gemm(module.residual_mlp.w2.weight,
+                                   scales[layer_name]["x"], None, None, alpha)
+            xverse_smoother[layer_name] = smoother.float()
+            scales[layer_name]["x"] = scales[layer_name]["x"] / smoother
+            scales[layer_name]["w"] = module.residual_mlp.w2.weight.abs().max(
+                dim=1)[0]
+
+
+@torch.no_grad()
+def capture_activation_range(model,
+                             tokenizer,
+                             dataset,
+                             num_samples=512,
+                             seq_len=512):
+    model.eval()
+    device = next(model.parameters()).device
+    act_scales = defaultdict(lambda: {"x": None, "y": None, "w": None})
+
+    tokenizer.pad_token = tokenizer.eos_token
+
+    def stat_tensor(name, tensor, act_scales, key):
+        hidden_dim = tensor.shape[-1]
+        tensor = tensor.view(-1, hidden_dim).abs().detach()
+        comming_max = torch.max(tensor, dim=0)[0].float()
+
+        if act_scales[name][key] is None:
+            act_scales[name][key] = comming_max
+        else:
+            act_scales[name][key] = torch.max(act_scales[name][key],
+                                              comming_max)
+
+    def stat_input_hook(m, x, y, name):
+        if isinstance(x, tuple):
+            x = x[0]
+        stat_tensor(name, x, act_scales, "x")
+        stat_tensor(name, y, act_scales, "y")
+
+        if act_scales[name]["w"] is None:
+            act_scales[name]["w"] = m.weight.abs().clip(1e-8,
+                                                        None).max(dim=1)[0]
+
+    hooks = []
+    for name, m in model.named_modules():
+        if isinstance(m, nn.Linear) or isinstance(m, Conv1D):
+            hooks.append(
+                m.register_forward_hook(
+                    functools.partial(stat_input_hook, name=name)))
+
+    for i in tqdm(range(num_samples), desc="calibrating model"):
+        datapoint = dataset[i:i + 1]
+        line = copy.copy(datapoint)
+        line[0] = line[0] + ' TL;DR: '
+        line[0] = line[0].strip()
+        line[0] = line[0].replace(" n't", "n't")
+        input_ids = tokenizer(line,
+                              return_tensors="pt",
+                              max_length=seq_len,
+                              padding=True,
+                              truncation=True).input_ids.to(device)
+        model(input_ids)
+    for h in hooks:
+        h.remove()
+    return act_scales
 
 
 def get_tllm_linear_sq_weight(vals,
@@ -288,11 +540,11 @@ def get_tllm_linear_sq_weight(vals,
 
 def split(v, tp_size, idx, dim=0):
     if tp_size == 1:
-        return v
+        return v.contiguous()
     if len(v.shape) == 1:
         return torch.chunk(v, tp_size)[idx].contiguous()
     else:
-        return torch.chunk(v, tp_size, dim=dim)[idx]
+        return torch.chunk(v, tp_size, dim=dim)[idx].contiguous()
 
 
 def split_qkv_tp(v, n_head, n_hidden, tensor_parallel, rank):
@@ -427,9 +679,13 @@ def load_weights_from_hf_model(hf_model,
     def convert_layer(l):
         prefix = f'model.layers.{l}.'
         tllm_prex = f'transformer.layers.{l - layers_range[0]}.'
-        q_weight = get_weight(model_params, prefix + 'self_attn.q_proj', dtype)
-        k_weight = get_weight(model_params, prefix + 'self_attn.k_proj', dtype)
-        v_weight = get_weight(model_params, prefix + 'self_attn.v_proj', dtype)
+        try:
+            q_weight = get_weight(model_params, prefix + 'self_attn.q_proj', dtype)
+            k_weight = get_weight(model_params, prefix + 'self_attn.k_proj', dtype)
+            v_weight = get_weight(model_params, prefix + 'self_attn.v_proj', dtype)
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            pdb.post_mortem()
 
         if not mha_mode:
             if config.num_key_value_heads < mapping.tp_size:
@@ -789,11 +1045,18 @@ def load_weights_from_hf_model(hf_model,
         ]
         for weight_name in cur_block_weights:
             model_params[weight_name] = None
-
+    
+    
+    # for l in reversed(layers_range):
     for l in layers_range:
         print(f"Converting layer {l}...")
         convert_layer(l)
+        # barrier.wait()
+        # if rank is not None and rank == 0:
+        # del hf_model.model.layers[l]
         release_gc()
+        # barrier.wait()
+        print(f"Finished converting layer {l}...")
 
     v = get_weight(model_params, 'model.embed_tokens', dtype)
     if hf_model.config.tie_word_embeddings:
@@ -843,6 +1106,88 @@ def load_weights_from_hf_model(hf_model,
     t = time.strftime('%H:%M:%S', time.gmtime(tok - tik))
     print(f'Weights loaded. Total time: {t}')
     return weights
+
+
+
+
+def smooth_quant(model,
+                 tokenizer,
+                 dataset,
+                 smoothquant: Optional[float] = None):
+    assert model is not None
+    act_range = {}
+    xverse_qkv_para = {}
+    # smoother for inputs of self_attn.o_proj and mlp.down_proj
+    xverse_smoother = {}
+
+    act_range = capture_activation_range(model, tokenizer, dataset)
+    if smoothquant is not None:
+        smooth_xverse_model(model, act_range, smoothquant, xverse_qkv_para,
+                           xverse_smoother)
+    return act_range, xverse_qkv_para, xverse_smoother
+
+
+def quantize(hf_model_dir: str,
+             output_dir: str,
+             config: XverseConfig,
+             calib_dataset='cnn_dailymail'):
+    '''
+        Quantize the save the model as TRT-LLM checkpoint to output_dir
+    '''
+    #TODO: currently only smooth quant and kv cache quantization are supported, needs to support mode quant algorithm calling modelopt
+
+    with open(os.path.join(output_dir, 'config.json'), 'w') as f:
+        json.dump(config.to_dict(), f, indent=4)
+
+    mapping = config.mapping
+    assert mapping.rank == -1, "You shall call quantize only once in one rank, assert rank==-1 for precaution"
+    quant_config = config.quantization
+
+    use_smooth_quant = quant_config.use_plugin_sq
+    int8_kv_cache = quant_config.kv_cache_quant_algo == QuantAlgo.INT8
+
+    assert use_smooth_quant or int8_kv_cache, "Call from_hugging_face when there is no quantization"
+    if use_smooth_quant:
+        assert quant_config.smoothquant_val is not None, "A smooth value must be specified when using smooth quant"
+
+    assert hf_model_dir is not None
+    ## only load and call smooth quant routine once for all ranks
+    hf_config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
+    assert "llava" not in hf_config.model_type, "Smooth quant llava/vila is not supported yet"
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        hf_model_dir,
+        device_map='auto',
+        torch_dtype='auto' if not use_smooth_quant else torch.float16,
+        trust_remote_code=True)
+
+    os.environ["TOKENIZERS_PARALLELISM"] = os.environ.get(
+        "TOKENIZERS_PARALLELISM", "false")
+    tokenizer = AutoTokenizer.from_pretrained(hf_model_dir,
+                                              trust_remote_code=True,
+                                              use_fast=False,
+                                              padding_side='left')
+
+    dataset = load_calib_dataset(calib_dataset)
+
+    act_range, qkv_para, smoother = smooth_quant(hf_model, tokenizer, dataset,
+                                                 quant_config.smoothquant_val)
+
+    for rank in range(mapping.world_size):
+        # To avoid changing the mapping arg in-place, also the given mapping from caller is rank agnostic, since quantize is called from only one rank
+        config = copy.deepcopy(config)
+        config.set_rank(rank)
+        weights = load_weights_from_hf_model(
+            hf_model,
+            config=config,
+            act_range=act_range,
+            qkv_para=qkv_para,
+            smoother=smoother,
+        )
+        safetensors.torch.save_file(
+            weights, os.path.join(output_dir, f'rank{rank}.safetensors'))
+        del weights
+
+
 
 # TODO: 需要适配MOE
 def load_weights_from_gptq(quant_ckpt_path: str, config: XverseConfig):
