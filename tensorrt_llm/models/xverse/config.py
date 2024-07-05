@@ -93,6 +93,8 @@ class XverseConfig(PretrainedConfig):
 
         num_key_value_heads = getattr(hf_config, "num_key_value_heads",
                                       hf_config.num_attention_heads)
+        head_dim = hf_config.hidden_size // hf_config.num_attention_heads
+        head_size = getattr(hf_config, "kv_channels", head_dim)
         hidden_act = hf_config.hidden_act
         rotary_base = getattr(hf_config, "rope_theta", 10000.0)
 
@@ -131,6 +133,7 @@ class XverseConfig(PretrainedConfig):
             hidden_size=hf_config.hidden_size,
             intermediate_size=hf_config.intermediate_size,
             num_key_value_heads=num_key_value_heads,
+            head_size=head_size,
             vocab_size=hf_config.vocab_size,
             position_embedding_type='rope_gpt_neox',
             max_position_embeddings=hf_config.max_position_embeddings,

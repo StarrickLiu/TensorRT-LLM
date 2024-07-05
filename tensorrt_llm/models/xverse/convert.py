@@ -1153,7 +1153,6 @@ def quantize(hf_model_dir: str,
     assert hf_model_dir is not None
     ## only load and call smooth quant routine once for all ranks
     hf_config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
-    assert "llava" not in hf_config.model_type, "Smooth quant llava/vila is not supported yet"
     hf_model = AutoModelForCausalLM.from_pretrained(
         hf_model_dir,
         device_map='auto',
@@ -1187,6 +1186,71 @@ def quantize(hf_model_dir: str,
             weights, os.path.join(output_dir, f'rank{rank}.safetensors'))
         del weights
 
+class QkvWeightHelper:
+    """ A helper utility for loading QKV weights from sharded files. """
+
+    def __init__(self, config: PretrainedConfig):
+        self.hidden_size = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.num_kv_heads = config.num_key_value_heads
+        self.tp_size = config.mapping.tp_size
+        self.tp_rank = config.mapping.tp_rank
+        self.is_mha = self.num_heads == self.num_kv_heads
+        self.head_size = None if not hasattr(config,
+                                             "head_size") else config.head_size
+        self._qkv_weights = {}
+
+    @staticmethod
+    def is_qkv_weight(name):
+        for k in ['q_proj', 'k_proj', 'v_proj']:
+            if 'self_attn' in name and k in name:
+                return True
+        return False
+
+    def add_weight(self, i: int, name: str, weight: torch.Tensor):
+        if 'q_proj' in name:
+            tag = 'q'
+        elif 'k_proj' in name:
+            tag = 'k'
+        elif 'v_proj' in name:
+            tag = 'v'
+        else:
+            raise ValueError(f'Got an unexpected parameter of name {name}')
+        if i not in self._qkv_weights:
+            self._qkv_weights[i] = {}
+        self._qkv_weights[i][tag] = weight
+
+    def is_qkv_prepared(self, layer_idx):
+        if layer_idx not in self._qkv_weights:
+            return False
+        weights = self._qkv_weights[layer_idx]
+        return 'q' in weights and 'k' in weights and 'v' in weights
+
+    def split_qkv_weights(self, layer_idx):
+        if not self.is_qkv_prepared(layer_idx):
+            return None
+        weights = self._qkv_weights.pop(layer_idx)  # to prevent memory leak.
+        q, k, v = (torch.tensor(weights[t]) for t in ['q', 'k', 'v'])
+
+        if not self.is_mha:
+            head_size = self.hidden_size // self.num_heads if self.head_size is None else self.head_size
+            if self.num_kv_heads < self.tp_size:
+                # duplicate the KV heads up to tensor_parallel
+                k = dup_kv_weight(k, self.num_kv_heads, self.tp_size)
+                v = dup_kv_weight(v, self.num_kv_heads, self.tp_size)
+            assert k.shape[0] % (self.tp_size * head_size) == 0
+            assert v.shape[0] % (self.tp_size * head_size) == 0
+            wq = split(q, self.tp_size, self.tp_rank)
+            wk = split(k, self.tp_size, self.tp_rank)
+            wv = split(v, self.tp_size, self.tp_rank)
+            fused_qkv = torch.cat((wq, wk, wv), dim=0)
+        else:
+            qkv = torch.cat([q, k, v], dim=0)
+            qkv = qkv.reshape(3, q.shape[0], q.shape[1])
+            fused_qkv = split(qkv, self.tp_size, self.tp_rank, dim=1)
+            fused_qkv = fused_qkv.reshape(3 * (q.shape[0] // self.tp_size),
+                                          q.shape[1])
+        return fused_qkv
 
 
 # TODO: 需要适配MOE
