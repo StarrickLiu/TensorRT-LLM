@@ -644,7 +644,7 @@ One can enable AWQ/GPTQ INT4 weight only quantization with these options when bu
 - `--use_weight_only` enables weight only GEMMs in the network.
 - `--per_group` enable groupwise weight only quantization, for GPT-J example, we support AWQ with the group size default as 128.
 - `--weight_only_precision` should specify the weight only quantization format. Supported formats are `int4_awq` or `int4_gptq`.
-- `--modelopt_quant_ckpt_path` passes the quantized checkpoint to build the engine.
+- `--quant_ckpt_path` passes the quantized checkpoint to build the engine.
 
 AWQ/GPTQ examples below involves 2 steps:
 1. Weight quantization
@@ -700,7 +700,7 @@ To run the GPTQ LLaMa example, the following steps are required:
     python convert_checkpoint.py --model_dir /tmp/llama-7b-hf \
                                  --output_dir ./tllm_checkpoint_2gpu_gptq \
                                  --dtype float16 \
-                                 --modelopt_quant_ckpt_path ./llama-7b-4bit-gs128.safetensors  \
+                                 --quant_ckpt_path ./llama-7b-4bit-gs128.safetensors  \
                                  --use_weight_only \
                                  --weight_only_precision int4_gptq \
                                  --per_group \
@@ -888,14 +888,14 @@ mpirun -n 8 --allow-run-as-root \
 
 ## Run models with LoRA
 
-* download the base model and lora model from HF
+Download the base model and lora model from HF:
 
 ```bash
 git-lfs clone https://huggingface.co/meta-llama/Llama-2-13b-hf
 git-lfs clone https://huggingface.co/hfl/chinese-llama-2-lora-13b
 ```
 
-* Build engine, setting `--lora_plugin` and `--lora_dir`. If lora has separate lm_head and embedding, they will replace lm_head and embedding of base model.
+Build engine, setting `--lora_plugin` and `--lora_dir`. If lora has separate lm_head and embedding, they will replace lm_head and embedding of base model.
 
 ```bash
 python convert_checkpoint.py --model_dir Llama-2-13b-hf \
@@ -913,7 +913,7 @@ trtllm-build --checkpoint_dir ./tllm_checkpoint_2gpu \
             --lora_dir chinese-llama-2-lora-13b
 ```
 
-* Run inference. Need to setup the `lora_dir`. Remember to use lora tokenizer because lora model has larger vocab size.
+Run inference. Remember to use lora tokenizer because lora model has larger vocab size.
 
 ```bash
 mpirun -n 2 python ../run.py --engine_dir "/tmp/new_lora_13b/trt_engines/fp16/2-gpu/" \
@@ -927,6 +927,7 @@ mpirun -n 2 python ../run.py --engine_dir "/tmp/new_lora_13b/trt_engines/fp16/2-
  Input: "今天天气很好，我到公园的时候，"
 Output: "发现公园里到处都是人，有的在跑步，有的在打羽毛球，还有的在跳绳，我和妈妈一起在公园里散步，我和妈妈在公园里散步的时候，看见了一位老爷爷在打羽毛球"
 ```
+
 Users who want to skip LoRA module may pass uid -1 with `--lora_task_uids -1`.
 In that case, the model will not run the LoRA module and the results will be
 different. Since the LoRA tokenizer, embedding and LM head are still used,

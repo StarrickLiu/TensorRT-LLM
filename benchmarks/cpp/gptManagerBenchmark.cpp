@@ -150,7 +150,9 @@ struct BenchmarkParams
     bool streaming{false};
     bool enableExpDelays{false};
     std::optional<float> requestRate{std::nullopt};
+    std::optional<int> concurrency{std::nullopt};
     std::optional<SizeType32> maxBatchSize{std::nullopt};
+    std::optional<SizeType32> maxNumTokens{std::nullopt};
     int randomSeed = 430;
     std::optional<int> maxAttentionWindow{std::nullopt};
 
@@ -165,6 +167,9 @@ struct BenchmarkParams
 
     // Weights offloading
     float gpuWeightsPercent{1.0};
+
+    // Decoding params
+    std::optional<std::vector<std::vector<SizeType32>>> medusaChoices;
 };
 
 class InferenceRequestsSyncSend
@@ -770,7 +775,9 @@ public:
         : mRecorder(std::move(recorder))
         , mWaitSleep(waitSleep)
         , mStaticEmulatedBatchSize(staticEmulatedBatchSize)
+        , mConcurrency(benchmarkParams.concurrency)
         , mActiveCount(0)
+        , mNumFinished(0)
         , mShutdown(false)
     {
 
@@ -790,6 +797,14 @@ public:
         {
             executorConfig.setMaxBatchSize(benchmarkParams.maxBatchSize.value());
         }
+        if (benchmarkParams.maxNumTokens)
+        {
+            executorConfig.setMaxNumTokens(benchmarkParams.maxNumTokens.value());
+        }
+
+        executorConfig.setDecodingConfig(texec::DecodingConfig(
+            benchmarkParams.medusaChoices.has_value() ? texec::DecodingMode::Medusa() : texec::DecodingMode::Auto(),
+            std::nullopt, benchmarkParams.medusaChoices));
 
         mExecutor = std::make_unique<texec::Executor>(trtEnginePath, texec::ModelType::kDECODER_ONLY, executorConfig);
 
@@ -836,10 +851,19 @@ public:
         }
     }
 
+    void resetNumFinished()
+    {
+        mNumFinished = 0;
+    }
+
+    bool canEnqueue(int numSentRequests) const
+    {
+        return !mConcurrency || (numSentRequests - mNumFinished < mConcurrency);
+    }
+
     void waitForResponses(SizeType32 numRequests, bool warmup = false)
     {
-        SizeType32 numFinished = 0;
-        while (mActiveCount || (numFinished < numRequests))
+        while (mActiveCount || (mNumFinished < numRequests))
         {
             auto responses = mExecutor->awaitResponses(mWaitSleep);
             for (auto const& response : responses)
@@ -849,7 +873,7 @@ public:
                 if (response.getResult().isFinal)
                 {
                     mActiveCount--;
-                    numFinished++;
+                    mNumFinished++;
                     if (!warmup)
                     {
                         mRecorder->recordEnd(reqId, response);
@@ -866,7 +890,7 @@ public:
         }
     }
 
-    void collectStats()
+    void collectStats() const
     {
         while (!mShutdown)
         {
@@ -886,7 +910,9 @@ private:
     std::shared_ptr<Recorder> mRecorder;
     std::chrono::milliseconds mWaitSleep;
     std::optional<int> mStaticEmulatedBatchSize;
+    std::optional<int> mConcurrency;
     std::atomic<uint64_t> mActiveCount;
+    std::atomic<uint64_t> mNumFinished;
     std::atomic<bool> mShutdown;
 }; // class ExecutorServer
 
@@ -907,9 +933,7 @@ public:
         , mInferReqSyncSndHdl(nullptr)
     {
         auto const jsonConfig = GptJsonConfig::parse(trtEnginePath / "config.json");
-        SizeType32 deviceCount{0};
-        TLLM_CUDA_CHECK(cudaGetDeviceCount(&deviceCount));
-        mWorldConfig = WorldConfig::mpi(deviceCount, jsonConfig.getTensorParallelism(),
+        mWorldConfig = WorldConfig::mpi(jsonConfig.getGpusPerNode(), jsonConfig.getTensorParallelism(),
             jsonConfig.getPipelineParallelism(), optionalParams.deviceIds);
         auto& comm = COMM_SESSION;
         mCommTensorParallel = std::make_shared<tensorrt_llm::mpi::MpiComm>(
@@ -1345,13 +1369,15 @@ void benchmarkGptManager(std::filesystem::path const& engineDir, TrtGptModelType
     optionalParams.gpuWeightsPercent = benchmarkParams.gpuWeightsPercent;
     optionalParams.maxBeamWidth = beamWidth;
     optionalParams.maxBatchSize = benchmarkParams.maxBatchSize;
+    optionalParams.maxNumTokens = benchmarkParams.maxNumTokens;
     optionalParams.schedulerConfig = texec::SchedulerConfig{capacitySchedulerPolicy};
+    optionalParams.decodingConfig = texec::DecodingConfig(
+        benchmarkParams.medusaChoices.has_value() ? texec::DecodingMode::Medusa() : texec::DecodingMode::Auto(),
+        std::nullopt, benchmarkParams.medusaChoices);
 
     auto const jsonConfig = GptJsonConfig::parse(engineDir / "config.json");
-    SizeType32 deviceCount{0};
-    TLLM_CUDA_CHECK(cudaGetDeviceCount(&deviceCount));
-    auto const worldConfig = WorldConfig::mpi(
-        deviceCount, jsonConfig.getTensorParallelism(), jsonConfig.getPipelineParallelism(), optionalParams.deviceIds);
+    auto const worldConfig = WorldConfig::mpi(jsonConfig.getGpusPerNode(), jsonConfig.getTensorParallelism(),
+        jsonConfig.getPipelineParallelism(), optionalParams.deviceIds);
 
     BufferManager bufferManager{std::make_shared<CudaStream>()}; // the stream is not used
 
@@ -1541,53 +1567,49 @@ void benchmarkExecutor(std::filesystem::path const& engineDir, TrtGptModelType m
                     benchmarkParams.streaming, returnContextLogits, returnGenerationLogits, loraConfig));
             }
 
-            bool hasDelay
+            bool const hasDelay
                 = std::any_of(timeDelays.begin(), timeDelays.end(), [](auto const& delay) { return delay > 0.0; });
-            if (hasDelay && staticEmulatedBatchSize)
-            {
-                TLLM_THROW("Executor benchmark doesn't support delays with emulated static batch sizes");
-            }
-
-            if (!hasDelay)
-            {
-                if (!staticEmulatedBatchSize)
-                {
-                    executorServer->enqueue(std::move(requests));
-                    executorServer->waitForResponses(numSamples);
-                }
-                else
-                {
-                    SizeType32 numRequests = requests.size();
-                    SizeType32 maxBatchSize = staticEmulatedBatchSize.value();
-                    for (SizeType32 req = 0; req < numRequests; req += maxBatchSize)
-                    {
-                        auto batchSize = std::min(maxBatchSize, numRequests - req);
-
-                        std::vector<texec::Request> requestsBatch(std::make_move_iterator(requests.begin() + req),
-                            std::make_move_iterator(requests.begin() + req + batchSize));
-                        // Enqueue in batches
-                        executorServer->enqueue(std::move(requestsBatch));
-                        // Wait for current batch to be done
-                        executorServer->waitForResponses(batchSize);
-                    }
-                }
-            }
-            else
+            executorServer->resetNumFinished();
+            if (!staticEmulatedBatchSize)
             {
                 // Launch a thread that will wait for responses
                 std::thread waitThread(
                     [numSamples, executorServer]() { executorServer->waitForResponses(numSamples); });
+
                 // Enqueue requests one by one
-                for (std::size_t i = 0; i < numSamples; ++i)
+                int numSentRequests = 0;
+                while (numSentRequests < numSamples)
                 {
-                    executorServer->enqueue({std::move(requests.at(i))});
-                    if (i < numSamples - 1)
+                    if (executorServer->canEnqueue(numSentRequests))
                     {
-                        std::this_thread::sleep_for(
-                            std::chrono::milliseconds(static_cast<int>(timeDelays.at(i) * 1000)));
+                        executorServer->enqueue({requests.at(numSentRequests)});
+                        if (hasDelay && numSentRequests < numSamples - 1)
+                        {
+                            std::this_thread::sleep_for(
+                                std::chrono::milliseconds(static_cast<int>(timeDelays.at(numSentRequests) * 1000)));
+                        }
+                        numSentRequests += 1;
                     }
                 }
                 waitThread.join();
+            }
+            else
+            {
+                TLLM_CHECK_WITH_INFO(
+                    !hasDelay, "Executor benchmark doesn't support delays with emulated static batch sizes");
+                SizeType32 numRequests = requests.size();
+                SizeType32 maxBatchSize = staticEmulatedBatchSize.value();
+                for (SizeType32 req = 0; req < numRequests; req += maxBatchSize)
+                {
+                    auto batchSize = std::min(maxBatchSize, numRequests - req);
+
+                    std::vector<texec::Request> requestsBatch(std::make_move_iterator(requests.begin() + req),
+                        std::make_move_iterator(requests.begin() + req + batchSize));
+                    // Enqueue in batches
+                    executorServer->enqueue(std::move(requestsBatch));
+                    // Wait for current batch to be done
+                    executorServer->waitForResponses(batchSize);
+                }
             }
         }
         recorder->finalize();
@@ -1598,6 +1620,32 @@ void benchmarkExecutor(std::filesystem::path const& engineDir, TrtGptModelType m
         // Sever on rank 0 will broadcast the terminate signal to other servers on multi-GPU cases
         // gptServer->enqueue(std::make_shared<InferenceRequest>(terminateReqId));
     }
+}
+
+std::vector<std::vector<SizeType32>> parseVectorOfVectors(std::string const& input)
+{
+    std::vector<std::vector<SizeType32>> result;
+    std::regex outer_regex(R"(\[(.*?)\])");
+    std::regex inner_regex(R"(\d+)");
+    auto outer_begin = std::sregex_iterator(input.begin(), input.end(), outer_regex);
+    auto outer_end = std::sregex_iterator();
+
+    for (std::sregex_iterator i = outer_begin; i != outer_end; ++i)
+    {
+        std::smatch match = *i;
+        std::string inner_str = match.str(1);
+        std::vector<int> inner_vec;
+        auto inner_begin = std::sregex_iterator(inner_str.begin(), inner_str.end(), inner_regex);
+        auto inner_end = std::sregex_iterator();
+
+        for (std::sregex_iterator j = inner_begin; j != inner_end; ++j)
+        {
+            std::smatch inner_match = *j;
+            inner_vec.push_back(std::stoi(inner_match.str()));
+        }
+        result.push_back(inner_vec);
+    }
+    return result;
 }
 
 } // namespace
@@ -1634,7 +1682,10 @@ int main(int argc, char* argv[])
     options.add_options()("request_rate",
         "request rate in reqs/sec. Skipping this arg or negative value will trigger offline/0-delay.",
         cxxopts::value<float>());
+    options.add_options()("concurrency", "Concurrent number of connections with the server.", cxxopts::value<int>());
     options.add_options()("max_batch_size", "The max runtime batch size when benchmarking", cxxopts::value<int>());
+    options.add_options()(
+        "max_num_tokens", "The max runtime number of tokens per batch when benchmarking", cxxopts::value<int>());
     options.add_options()("enable_trt_overlap", "Overlap TRT context preparation and execution",
         cxxopts::value<bool>()->default_value("false"));
     options.add_options()("enable_exp_delays", "Enables exponential delay distr to mimic real world request arrival",
@@ -1692,6 +1743,8 @@ int main(int argc, char* argv[])
     options.add_options()("gpu_weights_percent",
         "Specify the percentage of weights that reside on GPU (from 0.0 to 1.0).",
         cxxopts::value<float>()->default_value("1.0"));
+    options.add_options()(
+        "medusa_choices", "Medusa choices in the format of [[0], [0, 1], [0, 0, 1]]", cxxopts::value<std::string>());
 
     auto result = options.parse(argc, argv);
 
@@ -1778,16 +1831,31 @@ int main(int argc, char* argv[])
     // Argument: streaming
     benchmarkParams.streaming = result["streaming"].as<bool>();
 
+    TLLM_CHECK_WITH_INFO(!(result.count("request_rate") && result.count("concurrency")),
+        "request_rate and concurrency cannot be specified at the same time.");
+
     // Argument: request rate
     if (result.count("request_rate"))
     {
         benchmarkParams.requestRate = result["request_rate"].as<float>();
     }
 
+    // Argument: concurrency
+    if (result.count("concurrency"))
+    {
+        benchmarkParams.concurrency = result["concurrency"].as<int>();
+    }
+
     // Argument: request rate
     if (result.count("max_batch_size"))
     {
         benchmarkParams.maxBatchSize = result["max_batch_size"].as<int>();
+    }
+
+    // Argument: request rate
+    if (result.count("max_num_tokens"))
+    {
+        benchmarkParams.maxNumTokens = result["max_num_tokens"].as<int>();
     }
 
     benchmarkParams.enableExpDelays = result["enable_exp_delays"].as<bool>();
@@ -1822,6 +1890,12 @@ int main(int argc, char* argv[])
 
     // Argument: If offloaded blocks should be onboarded to primary memory before they are reused.
     benchmarkParams.kvOnboardBlocks = !result["kv_dont_onboard_blocks"].as<bool>();
+
+    // Argument: Medusa choices for the Medusa speculative decoding.
+    if (result.count("medusa_choices"))
+    {
+        benchmarkParams.medusaChoices = parseVectorOfVectors(result["medusa_choices"].as<std::string>());
+    }
 
     std::optional<TokenIdType> padId;
     // Argument: Padding token id
