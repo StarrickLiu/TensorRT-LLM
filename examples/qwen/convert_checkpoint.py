@@ -240,7 +240,6 @@ def convert_and_save_hf(args):
     override_fields.update(args_to_build_options(args))
 
     if args.smoothquant is not None or args.int8_kv_cache:
-        assert not args.load_model_on_cpu, "When using quantization, TRT-LLM needs to load the model to GPU"
         mapping = Mapping(
             world_size=world_size,
             rank=-1,  #intentinoally make -1 to avoid mistake
@@ -255,6 +254,7 @@ def convert_and_save_hf(args):
                  args.output_dir,
                  mapping=mapping,
                  quantization=quantization,
+                 device='cpu' if args.load_model_on_cpu else 'cuda',
                  calib_dataset=args.calib_dataset,
                  override_fields=override_fields,
                  dataset_cache_dir=args.dataset_cache_dir,

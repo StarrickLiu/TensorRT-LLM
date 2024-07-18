@@ -1239,14 +1239,3 @@ def test_executor_config_pickle():
     assert config.max_beam_width == config_copy.max_beam_width
     assert config.scheduler_config.capacity_scheduler_policy == config_copy.scheduler_config.capacity_scheduler_policy
     assert config.kv_cache_config.enable_block_reuse == config_copy.kv_cache_config.enable_block_reuse
-
-
-def test_return_full_tokens():
-    max_new_tokens = 5
-    input_tokens = [1, 2, 3, 4]
-    request = trtllm.Request(input_tokens, max_new_tokens, False,
-                             trtllm.SamplingConfig())
-    request.return_all_generated_tokens = True
-    assert request.return_all_generated_tokens == True
-    request.return_all_generated_tokens = False
-    assert request.return_all_generated_tokens == False

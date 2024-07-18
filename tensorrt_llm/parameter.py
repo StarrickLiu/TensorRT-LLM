@@ -94,14 +94,14 @@ class Parameter:
                                   device='cuda')
             # value ~ U[int(-128 * v_range), int(128 * v_range)]
         elif dtype == trt.DataType.FP8:
-            value = torch.randn((shape), device='cuda') * 2 - 1
-            # value ~ N[-v_range, v_range]
+            value = torch.rand((shape), device='cuda') * 2 - 1
+            # value ~ U[-v_range, v_range]
             value = value * v_range
             value = value.to(trt_dtype_to_torch(dtype))
         else:
-            value = torch.randn(
+            value = torch.rand(
                 (shape), dtype=trt_dtype_to_torch(dtype), device='cuda') * 2 - 1
-            # value ~ N[-v_range, v_range]
+            # value ~ U[-v_range, v_range]
             value = value * v_range
 
         stream = torch.cuda.Stream()

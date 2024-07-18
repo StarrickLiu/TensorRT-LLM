@@ -12,7 +12,7 @@ from transformers import AutoTokenizer
 from tensorrt_llm.hlapi import LLM, KvCacheConfig, SamplingParams, TokenizerBase
 from tensorrt_llm.hlapi.llm_utils import BuildConfig, _ParallelConfig
 from tensorrt_llm.hlapi.tokenizer import TransformersTokenizer
-from tensorrt_llm.hlapi.utils import GpuArch, get_total_gpu_memory
+from tensorrt_llm.hlapi.utils import get_total_gpu_memory
 from tensorrt_llm.models import PretrainedConfig
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
@@ -80,12 +80,7 @@ def test_llm_loading_from_hf():
     llm = LLM(
         model=llama_model_path,
         kv_cache_config=KvCacheConfig(free_gpu_memory_fraction=0.4),
-        enable_chunked_context=True,
     )
-
-    if GpuArch.is_post_ampere():
-        # chunked_context should be enabled by default
-        assert llm.args.enable_chunked_context
 
     sampling_params = SamplingParams(max_new_tokens=8)
 
@@ -164,7 +159,6 @@ def test_llm_without_tokenizer():
         model=llama_model_path,
         skip_tokenizer_init=True,
         kv_cache_config=KvCacheConfig(free_gpu_memory_fraction=0.4),
-        enable_chunked_context=True,
     )
 
     sampling_params = SamplingParams(end_id=2, pad_id=2, max_new_tokens=8)
@@ -450,7 +444,6 @@ def test_generate_with_stop_words():
         assert output.outputs[0].text == "D E F G H I"
 
 
-@pytest.mark.skip("waive")
 @force_ampere
 def test_generate_with_bad_words():
     llm = LLM(
@@ -458,24 +451,16 @@ def test_generate_with_bad_words():
         kv_cache_config=KvCacheConfig(free_gpu_memory_fraction=0.4),
     )
 
-    sampling_params = SamplingParams(max_new_tokens=6)
-
-    tokenizer = AutoTokenizer.from_pretrained(llama_model_path,
-                                              add_prefix_space=False)
-
     # TODO[chunweiy]: Consider to make the generate api accept bad_words as a list of strings
-    bad_words = tokenizer(["H", "I"]).input_ids
-    bad_words = [row[1] for row in tokenizer(["H", "I"]).input_ids]
-    bad_words = [bad_words]
+    bad_words = [llm.tokenizer.encode("H I", add_special_tokens=False)]
     print('bad_words:', bad_words)
-    sampling_params.bad_words = bad_words
 
+    sampling_params = SamplingParams(max_new_tokens=6, bad_words=bad_words)
     for output in llm.generate(prompts, sampling_params=sampling_params):
         print(output)
         assert output.outputs[0].text == "D E F G HI"
 
 
-@pytest.mark.skip("waive")
 @force_ampere
 def test_generate_with_embedding_bias():
     llm = LLM(
@@ -483,28 +468,23 @@ def test_generate_with_embedding_bias():
         kv_cache_config=KvCacheConfig(free_gpu_memory_fraction=0.4),
     )
 
-    sampling_params = SamplingParams(max_new_tokens=6)
-
-    tokenizer = AutoTokenizer.from_pretrained(llama_model_path,
-                                              add_prefix_space=False)
-    biased_word_id = tokenizer(["Z"]).input_ids[0][1]
-
+    biased_word_id = llm.tokenizer.encode("Z", add_special_tokens=False)[-1]
     vocab_size_padded = 32000
     embedding_bias = torch.zeros(vocab_size_padded)
     embedding_bias[biased_word_id] = torch.finfo(torch.float32).max
-    sampling_params.embedding_bias = embedding_bias
+
+    sampling_params = SamplingParams(max_new_tokens=6,
+                                     embedding_bias=embedding_bias)
 
     for output in llm.generate(prompts, sampling_params=sampling_params):
         print(output)
         assert output.outputs[0].text == "Z Z Z Z Z Z"
 
 
-@pytest.mark.skip("waive")
 @force_ampere
 def test_generate_with_logits_post_processor():
-    tokenizer = AutoTokenizer.from_pretrained(llama_model_path,
-                                              add_prefix_space=False)
-    biased_word_id = tokenizer(["Z"]).input_ids[0][1]
+    tokenizer = AutoTokenizer.from_pretrained(llama_model_path)
+    biased_word_id = tokenizer.encode("Z", add_special_tokens=False)[-1]
 
     def logits_post_processor(req_id: int, logits: torch.Tensor,
                               ids: List[List[int]], stream_ptr: int):
@@ -516,8 +496,8 @@ def test_generate_with_logits_post_processor():
               kv_cache_config=KvCacheConfig(free_gpu_memory_fraction=0.4),
               logits_post_processor_map={"my_logits_pp": logits_post_processor})
 
-    sampling_params = SamplingParams(max_new_tokens=6)
-    sampling_params.logits_post_processor_name = "my_logits_pp"
+    sampling_params = SamplingParams(max_new_tokens=6,
+                                     logits_post_processor_name="my_logits_pp")
 
     for output in llm.generate(prompts, sampling_params=sampling_params):
         print(output)

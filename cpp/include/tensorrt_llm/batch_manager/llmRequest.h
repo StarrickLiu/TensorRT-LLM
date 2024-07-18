@@ -84,7 +84,6 @@ public:
         , mSamplingConfig(samplingConfig)
         , mState(REQUEST_STATE_CONTEXT_INIT)
         , mIsStreaming(isStreaming)
-        , mReturnAllGeneratedTokens(isStreaming && (samplingConfig.beamWidth > 1))
         , mEndId(endId)
         , mPadId(padId)
         , mLogitsPostProcessor(logitsPostProcessor)
@@ -127,7 +126,6 @@ public:
         , mSamplingConfig(req.getSamplingConfig(), req.getExternalDraftTokensConfig())
         , mState(REQUEST_STATE_CONTEXT_INIT)
         , mIsStreaming(req.getStreaming())
-        , mReturnAllGeneratedTokens(req.getReturnAllGeneratedTokens())
         , mEndId(req.getEndId())
         , mPadId(req.getPadId())
         , mOrigPromptLen(mPromptLen)
@@ -154,16 +152,6 @@ public:
         , mReturnEncoderOutput(req.getOutputConfig().returnEncoderOutput)
         , mDecodingIter(0)
     {
-        if (mIsStreaming && mSamplingConfig.beamWidth > 1 && mReturnAllGeneratedTokens == false)
-        {
-            TLLM_LOG_WARNING(
-                "Setting mReturnAllGeneratedTokens to True since streaming AND beam search are done simultaneously. "
-                "Returning the full beams at each streaming step is needed because beam search + streaming can change "
-                "previous outputs. Initialize request with mReturnAllGeneratedTokens = True to dismiss this error."
-                "WARNING: using this option may increase network usage significantly (quadratically w.r.t output "
-                "length).");
-            mReturnAllGeneratedTokens = true;
-        }
         if (req.getEncoderInputTokenIds())
         {
             mState = REQUEST_STATE_ENCODER_INIT;
@@ -741,7 +729,7 @@ public:
         return mGenerationLogitsFragments;
     }
 
-    void addGenerationFragments(TensorPtr& genLogits)
+    void addGenerationLogitsFragment(TensorPtr& genLogits)
     {
         mGenerationLogitsFragments.push_back(genLogits);
     }
@@ -883,22 +871,16 @@ public:
             // FIXME(nkorobov): For streaming we do not allow beam search and
             // streaming index calculation here applies only for sampling
             // getNumTokensPerIteration takes accepted draft tokens into account
-            auto nbTokensOut
-                = (mReturnAllGeneratedTokens || !mIsStreaming) ? maxNbTokens : std::max(getNumTokensPerIteration(), 1);
-
+            int nbTokensOut = mIsStreaming ? std::max(getNumTokensPerIteration(), 1) : maxNbTokens;
             if (mExcludeInputFromOutput && !mIsStreaming)
             {
                 nbTokensOut -= getOrigPromptLen();
             }
 
             result.outputTokenIds.resize(nbBeams);
+            SizeType32 tokenPos = maxNbTokens - nbTokensOut;
 
-            // in the case of streaming + beam search
-            // we need to return the full beams at all iterations
-
-            SizeType32 tokenPos{maxNbTokens - nbTokensOut};
-            auto const shouldSendResponse = isGenerationCompleteState()
-                || (mIsStreaming && tokenPos > getMaxSentTokenPos()) || mReturnAllGeneratedTokens;
+            bool shouldSendResponse = isGenerationCompleteState() || (mIsStreaming && tokenPos > getMaxSentTokenPos());
 
             if (!shouldSendResponse)
             {
@@ -909,8 +891,7 @@ public:
                 for (SizeType32 beam = 0; beam < nbBeams; ++beam)
                 {
                     auto tokens = getTokens(beam);
-                    auto nbTokens = (mReturnAllGeneratedTokens || !mIsStreaming) ? tokens.size()
-                                                                                 : (tokenPos - getMaxSentTokenPos());
+                    auto nbTokens = mIsStreaming ? (tokenPos - getMaxSentTokenPos()) : tokens.size();
 
                     // Take accepted draft tokens into account when streaming
                     auto const numAcceptedTokens = std::max(0, getNumTokensPerIteration() - 1);
@@ -982,8 +963,6 @@ public:
     runtime::SamplingConfig mSamplingConfig;
     LlmRequestState_t mState;
     bool mIsStreaming;
-    // whether to return the full beams on each iteration. True when doing streaming + beamsearch
-    bool mReturnAllGeneratedTokens;
     std::optional<TokenIdType> mEndId;
     std::optional<TokenIdType> mPadId;
     std::optional<SizeType32> mSeqSlot;

@@ -1198,7 +1198,8 @@ def smooth_quant(model,
 def quantize(hf_model_dir: str,
              output_dir: str,
              config: LLaMAConfig,
-             calib_dataset='cnn_dailymail'):
+             device: str = 'cuda',
+             calib_dataset: str = 'cnn_dailymail'):
     '''
         Quantize the save the model as TRT-LLM checkpoint to output_dir
     '''
@@ -1224,7 +1225,7 @@ def quantize(hf_model_dir: str,
     assert "llava" not in hf_config.model_type, "Smooth quant llava/vila is not supported yet"
     hf_model = AutoModelForCausalLM.from_pretrained(
         hf_model_dir,
-        device_map='auto',
+        device_map='auto' if device != 'cpu' else 'cpu',
         torch_dtype='auto' if not use_smooth_quant else torch.float16,
         trust_remote_code=True)
 
@@ -1266,8 +1267,6 @@ class QkvWeightHelper:
         self.tp_size = config.mapping.tp_size
         self.tp_rank = config.mapping.tp_rank
         self.is_mha = self.num_heads == self.num_kv_heads
-        self.head_size = None if not hasattr(config,
-                                             "head_size") else config.head_size
         self._qkv_weights = {}
 
     @staticmethod
@@ -1303,7 +1302,7 @@ class QkvWeightHelper:
         q, k, v = (torch.tensor(weights[t]) for t in ['q', 'k', 'v'])
 
         if not self.is_mha:
-            head_size = self.hidden_size // self.num_heads if self.head_size is None else self.head_size
+            head_size = self.hidden_size // self.num_heads
             if self.num_kv_heads < self.tp_size:
                 # duplicate the KV heads up to tensor_parallel
                 k = dup_kv_weight(k, self.num_kv_heads, self.tp_size)

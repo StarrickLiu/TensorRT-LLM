@@ -627,12 +627,13 @@ class PretrainedModel(Module,
         mapping: Optional[Mapping] = None,
         quant_config: Optional[QuantConfig] = None,
         *,
-        calib_dataset='cnn_dailymail',
-        calib_batches=512,
-        calib_batch_size=1,
-        calib_max_seq_length=512,
-        random_seed=1234,
-        tokenizer_max_seq_length=2048,
+        device: str = 'cuda',
+        calib_dataset: str = 'cnn_dailymail',
+        calib_batches: int = 512,
+        calib_batch_size: int = 1,
+        calib_max_seq_length: int = 512,
+        random_seed: int = 1234,
+        tokenizer_max_seq_length: int = 2048,
     ):
         if mapping is None:  # single gpu
             mapping = Mapping()
@@ -647,7 +648,7 @@ class PretrainedModel(Module,
             hf_model_dir)  # quantize_and_export has some code can not take Path
         quantize_and_export(
             model_dir=hf_model_dir,
-            device='cuda',
+            device=device,
             calib_dataset=calib_dataset,
             dtype=dtype,
             qformat=modelopt_qformat,
@@ -997,7 +998,7 @@ def to_ootb_moe(model: PretrainedModel) -> PretrainedModel:
     for name, layer, parent in model.named_modules_with_parent():
         if isinstance(layer, MOE):
             layer_name = name.rsplit('.', 1)[-1]
-            ootb_layer = layer.to(MoeOOTB, model.config.quantization)
+            ootb_layer = layer.to(MoeOOTB, model.config)
             setattr(parent, layer_name, ootb_layer)
     return model
 

@@ -1909,3 +1909,6 @@ class WhisperEncoder(PretrainedModel):
         )
 
         return {'x': x, 'input_lengths': input_lengths}
+
+    def precompute_relative_attention_bias(self, build_config):
+        pass

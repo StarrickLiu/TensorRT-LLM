@@ -150,7 +150,6 @@ struct BenchmarkParams
     bool streaming{false};
     bool enableExpDelays{false};
     std::optional<float> requestRate{std::nullopt};
-    std::optional<int> concurrency{std::nullopt};
     std::optional<SizeType32> maxBatchSize{std::nullopt};
     std::optional<SizeType32> maxNumTokens{std::nullopt};
     int randomSeed = 430;
@@ -775,9 +774,7 @@ public:
         : mRecorder(std::move(recorder))
         , mWaitSleep(waitSleep)
         , mStaticEmulatedBatchSize(staticEmulatedBatchSize)
-        , mConcurrency(benchmarkParams.concurrency)
         , mActiveCount(0)
-        , mNumFinished(0)
         , mShutdown(false)
     {
 
@@ -851,19 +848,10 @@ public:
         }
     }
 
-    void resetNumFinished()
-    {
-        mNumFinished = 0;
-    }
-
-    bool canEnqueue(int numSentRequests) const
-    {
-        return !mConcurrency || (numSentRequests - mNumFinished < mConcurrency);
-    }
-
     void waitForResponses(SizeType32 numRequests, bool warmup = false)
     {
-        while (mActiveCount || (mNumFinished < numRequests))
+        SizeType32 numFinished = 0;
+        while (mActiveCount || (numFinished < numRequests))
         {
             auto responses = mExecutor->awaitResponses(mWaitSleep);
             for (auto const& response : responses)
@@ -873,7 +861,7 @@ public:
                 if (response.getResult().isFinal)
                 {
                     mActiveCount--;
-                    mNumFinished++;
+                    numFinished++;
                     if (!warmup)
                     {
                         mRecorder->recordEnd(reqId, response);
@@ -890,7 +878,7 @@ public:
         }
     }
 
-    void collectStats() const
+    void collectStats()
     {
         while (!mShutdown)
         {
@@ -910,9 +898,7 @@ private:
     std::shared_ptr<Recorder> mRecorder;
     std::chrono::milliseconds mWaitSleep;
     std::optional<int> mStaticEmulatedBatchSize;
-    std::optional<int> mConcurrency;
     std::atomic<uint64_t> mActiveCount;
-    std::atomic<uint64_t> mNumFinished;
     std::atomic<bool> mShutdown;
 }; // class ExecutorServer
 
@@ -1414,6 +1400,7 @@ void benchmarkGptManager(std::filesystem::path const& engineDir, TrtGptModelType
             auto startLoraLoad = std::chrono::steady_clock::now();
             LoraLib loras(benchmarkParams.loraDir.value());
             SizeType32 reqId = 0;
+            gptServer->resetBatchDeadline();
             for (auto const& [taskId, p] : loras.getLoras())
             {
                 reqId++;
@@ -1525,6 +1512,9 @@ void benchmarkExecutor(std::filesystem::path const& engineDir, TrtGptModelType m
             std::vector<texec::Request> requests;
             for (auto& [taskId, p] : loras.getLoras())
             {
+                // squeeze lora configs and weights since LoraConfig requires them to be 2D tensors
+                p.first->squeeze(0);
+                p.second->squeeze(0);
                 texec::LoraConfig loraConfig(
                     taskId, texec::detail::ofITensor(p.first), texec::detail::ofITensor(p.second));
                 Sample s{std::vector<int32_t>{1, 2, 3, 4, 5}, 1, static_cast<int32_t>(taskId)};
@@ -1567,49 +1557,53 @@ void benchmarkExecutor(std::filesystem::path const& engineDir, TrtGptModelType m
                     benchmarkParams.streaming, returnContextLogits, returnGenerationLogits, loraConfig));
             }
 
-            bool const hasDelay
+            bool hasDelay
                 = std::any_of(timeDelays.begin(), timeDelays.end(), [](auto const& delay) { return delay > 0.0; });
-            executorServer->resetNumFinished();
-            if (!staticEmulatedBatchSize)
+            if (hasDelay && staticEmulatedBatchSize)
+            {
+                TLLM_THROW("Executor benchmark doesn't support delays with emulated static batch sizes");
+            }
+
+            if (!hasDelay)
+            {
+                if (!staticEmulatedBatchSize)
+                {
+                    executorServer->enqueue(std::move(requests));
+                    executorServer->waitForResponses(numSamples);
+                }
+                else
+                {
+                    SizeType32 numRequests = requests.size();
+                    SizeType32 maxBatchSize = staticEmulatedBatchSize.value();
+                    for (SizeType32 req = 0; req < numRequests; req += maxBatchSize)
+                    {
+                        auto batchSize = std::min(maxBatchSize, numRequests - req);
+
+                        std::vector<texec::Request> requestsBatch(std::make_move_iterator(requests.begin() + req),
+                            std::make_move_iterator(requests.begin() + req + batchSize));
+                        // Enqueue in batches
+                        executorServer->enqueue(std::move(requestsBatch));
+                        // Wait for current batch to be done
+                        executorServer->waitForResponses(batchSize);
+                    }
+                }
+            }
+            else
             {
                 // Launch a thread that will wait for responses
                 std::thread waitThread(
                     [numSamples, executorServer]() { executorServer->waitForResponses(numSamples); });
-
                 // Enqueue requests one by one
-                int numSentRequests = 0;
-                while (numSentRequests < numSamples)
+                for (std::size_t i = 0; i < numSamples; ++i)
                 {
-                    if (executorServer->canEnqueue(numSentRequests))
+                    executorServer->enqueue({std::move(requests.at(i))});
+                    if (i < numSamples - 1)
                     {
-                        executorServer->enqueue({requests.at(numSentRequests)});
-                        if (hasDelay && numSentRequests < numSamples - 1)
-                        {
-                            std::this_thread::sleep_for(
-                                std::chrono::milliseconds(static_cast<int>(timeDelays.at(numSentRequests) * 1000)));
-                        }
-                        numSentRequests += 1;
+                        std::this_thread::sleep_for(
+                            std::chrono::milliseconds(static_cast<int>(timeDelays.at(i) * 1000)));
                     }
                 }
                 waitThread.join();
-            }
-            else
-            {
-                TLLM_CHECK_WITH_INFO(
-                    !hasDelay, "Executor benchmark doesn't support delays with emulated static batch sizes");
-                SizeType32 numRequests = requests.size();
-                SizeType32 maxBatchSize = staticEmulatedBatchSize.value();
-                for (SizeType32 req = 0; req < numRequests; req += maxBatchSize)
-                {
-                    auto batchSize = std::min(maxBatchSize, numRequests - req);
-
-                    std::vector<texec::Request> requestsBatch(std::make_move_iterator(requests.begin() + req),
-                        std::make_move_iterator(requests.begin() + req + batchSize));
-                    // Enqueue in batches
-                    executorServer->enqueue(std::move(requestsBatch));
-                    // Wait for current batch to be done
-                    executorServer->waitForResponses(batchSize);
-                }
             }
         }
         recorder->finalize();
@@ -1682,7 +1676,6 @@ int main(int argc, char* argv[])
     options.add_options()("request_rate",
         "request rate in reqs/sec. Skipping this arg or negative value will trigger offline/0-delay.",
         cxxopts::value<float>());
-    options.add_options()("concurrency", "Concurrent number of connections with the server.", cxxopts::value<int>());
     options.add_options()("max_batch_size", "The max runtime batch size when benchmarking", cxxopts::value<int>());
     options.add_options()(
         "max_num_tokens", "The max runtime number of tokens per batch when benchmarking", cxxopts::value<int>());
@@ -1831,19 +1824,10 @@ int main(int argc, char* argv[])
     // Argument: streaming
     benchmarkParams.streaming = result["streaming"].as<bool>();
 
-    TLLM_CHECK_WITH_INFO(!(result.count("request_rate") && result.count("concurrency")),
-        "request_rate and concurrency cannot be specified at the same time.");
-
     // Argument: request rate
     if (result.count("request_rate"))
     {
         benchmarkParams.requestRate = result["request_rate"].as<float>();
-    }
-
-    // Argument: concurrency
-    if (result.count("concurrency"))
-    {
-        benchmarkParams.concurrency = result["concurrency"].as<int>();
     }
 
     // Argument: request rate

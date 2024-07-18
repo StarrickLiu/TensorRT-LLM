@@ -461,11 +461,19 @@ def run_single_gpu_tests(build_dir: _pl.Path,
         run_command(ctest, cwd=build_dir, env=cpp_env, timeout=timeout)
 
 
+def produce_mpirun_command(*, global_commands, nranks, local_commands,
+                           leader_commands):
+    l = global_commands
+    for rank in range(nranks):
+        l += ["-n", "1"] + local_commands + (leader_commands
+                                             if rank == 0 else []) + [":"]
+    return l[:-1]
+
+
 def run_multi_gpu_tests(build_dir: _pl.Path, timeout=1500):
     build_tests(build_dir=build_dir)
 
     tests_dir = build_dir / "tests"
-    xml_output_file = build_dir / "results-multi-gpu-real-decoder.xml"
     cpp_env = {**_os.environ}
     # Utils tests
     mpi_utils_test = [
@@ -477,11 +485,15 @@ def run_multi_gpu_tests(build_dir: _pl.Path, timeout=1500):
     ]
     run_command(mpi_utils_test, cwd=tests_dir, env=cpp_env, timeout=300)
 
-    trt_model_test = [
-        "mpirun", "-n", "4", "--allow-run-as-root",
-        "batch_manager/trtGptModelRealDecoderTest", "--gtest_filter=*TP*:*PP*",
-        f"--gtest_output=xml:{xml_output_file}"
-    ]
+    xml_output_file = build_dir / "results-multi-gpu-real-decoder.xml"
+    trt_model_test = produce_mpirun_command(
+        global_commands=["mpirun", "--allow-run-as-root"],
+        nranks=4,
+        local_commands=[
+            "batch_manager/trtGptModelRealDecoderTest",
+            "--gtest_filter=*TP*:*PP*"
+        ],
+        leader_commands=[f"--gtest_output=xml:{xml_output_file}"])
     run_command(trt_model_test, cwd=tests_dir, env=cpp_env,
                 timeout=timeout)  # expecting ~ 1200s
 
@@ -489,11 +501,14 @@ def run_multi_gpu_tests(build_dir: _pl.Path, timeout=1500):
     new_env = cpp_env
     xml_output_file = build_dir / "results-multi-gpu-llama-exec-leader-mode.xml"
     new_env["RUN_LLAMA_MULTI_GPU"] = "true"
-    trt_model_test = [
-        "mpirun", "-n", "4", "--allow-run-as-root", "executor/executorTest",
-        "--gtest_filter=*LlamaExecutorTest*LeaderMode*",
-        f"--gtest_output=xml:{xml_output_file}"
-    ]
+    trt_model_test = produce_mpirun_command(
+        global_commands=["mpirun", "--allow-run-as-root"],
+        nranks=4,
+        local_commands=[
+            "executor/executorTest",
+            "--gtest_filter=*LlamaExecutorTest*LeaderMode*"
+        ],
+        leader_commands=[f"--gtest_output=xml:{xml_output_file}"])
     run_command(trt_model_test, cwd=tests_dir, env=new_env, timeout=1500)
 
     # Executor test in orchestrator mode
@@ -509,11 +524,15 @@ def run_multi_gpu_tests(build_dir: _pl.Path, timeout=1500):
     #EncDec test in leader mode
     new_env = cpp_env
     xml_output_file = build_dir / "results-multi-gpu-t5-exec-leader-mode.xml"
-    trt_model_test = [
-        "mpirun", "-n", "4", "--allow-run-as-root", "executor/executorTest",
-        "--gtest_filter=T5MultiGPUTest/EncDecParamsTest.Forward*",
-        f"--gtest_output=xml:{xml_output_file}"
-    ]
+    trt_model_test = produce_mpirun_command(
+        global_commands=["mpirun", "--allow-run-as-root"],
+        nranks=4,
+        local_commands=[
+            "executor/executorTest",
+            "--gtest_filter=T5MultiGPUTest/EncDecParamsTest.Forward*"
+        ],
+        leader_commands=[f"--gtest_output=xml:{xml_output_file}"],
+    )
     run_command(trt_model_test, cwd=tests_dir, env=new_env, timeout=1500)
 
 
@@ -595,8 +614,6 @@ def run_benchmarks(python_exe: str, root_dir: _pl.Path, build_dir: _pl.Path,
                 run_command(benchmark, cwd=root_dir, timeout=600)
                 req_rate_benchmark = benchmark + ["--request_rate", "100"]
                 run_command(req_rate_benchmark, cwd=root_dir, timeout=600)
-                concurrency_benchmark = benchmark + ["--concurrency", "30"]
-                run_command(concurrency_benchmark, cwd=root_dir, timeout=600)
 
         benchmark = [
             str(benchmark_exe_dir / "gptManagerBenchmark"), "--engine_dir",

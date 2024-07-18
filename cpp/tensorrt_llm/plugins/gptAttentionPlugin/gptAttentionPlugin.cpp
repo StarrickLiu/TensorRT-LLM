@@ -721,9 +721,10 @@ int GPTAttentionPlugin::enqueueSome(int32_t seqIdxBeg, int32_t localNbSeq, int32
 
         {
             std::string const afterContexStr = "ctx attention at layer " + std::to_string(mLayerIdx);
-            TLLM_CHECK_DEBUG_WITH_INFO(tensorrt_llm::runtime::utils::tensorHasNan(localNbTokens,
-                                           outputDesc[0].dims.d[getPackedTensorHiddenDimIndex(mRemovePadding)], mType,
-                                           context_buf_, stream, afterContexStr)
+            TLLM_CHECK_DEBUG_WITH_INFO(
+                tensorrt_llm::runtime::utils::tensorHasNan(localNbTokens,
+                    outputDesc[0].dims.d[getPackedTensorHiddenDimIndex(mRemovePadding)],
+                    mFP8ContextFMHA ? nvinfer1::DataType::kFP8 : mType, context_buf_, stream, afterContexStr)
                     == false,
                 "Found Nan in " + afterContexStr);
         }
@@ -781,11 +782,14 @@ int GPTAttentionPlugin::enqueueSome(int32_t seqIdxBeg, int32_t localNbSeq, int32
 
         {
             std::string const afterGenStr = "gen attention at layer " + std::to_string(mLayerIdx);
-            TLLM_CHECK_DEBUG_WITH_INFO(tensorrt_llm::runtime::utils::tensorHasNan(localNbTokens,
-                                           outputDesc[0].dims.d[getPackedTensorHiddenDimIndex(mRemovePadding)], mType,
-                                           context_buf_, stream, afterGenStr)
-                    == false,
-                "Found Nan in " + afterGenStr);
+            {
+                TLLM_CHECK_DEBUG_WITH_INFO(
+                    tensorrt_llm::runtime::utils::tensorHasNan(localNbTokens,
+                        outputDesc[0].dims.d[getPackedTensorHiddenDimIndex(mRemovePadding)],
+                        mFP8ContextFMHA ? nvinfer1::DataType::kFP8 : mType, context_buf_, stream, afterGenStr)
+                        == false,
+                    "Found Nan in " + afterGenStr);
+            }
         }
     }
 

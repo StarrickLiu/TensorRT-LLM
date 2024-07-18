@@ -2074,7 +2074,7 @@ __global__ void convertData(Dst* dst, Src const* src, int64_t size, float const*
     constexpr uint32_t packSize = 16 / std::max(srcElemSize, dstElemSize);
     auto const tid = blockDim.x * blockIdx.x + threadIdx.x;
     auto const nbThrds = blockDim.x * gridDim.x;
-    if (nbThrds * packSize + packSize - 1 >= size)
+    if (tid * packSize >= size)
     {
         return;
     }

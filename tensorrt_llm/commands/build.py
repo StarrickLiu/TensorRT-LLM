@@ -27,11 +27,11 @@ import torch
 from ..auto_parallel import infer_cluster_config
 from ..auto_parallel.cluster_info import cluster_infos
 from ..builder import BuildConfig, Engine, build
+from ..functional import PositionEmbeddingType
 from ..logger import logger
 from ..lora_manager import LoraConfig, LoraManager
 from ..models import MODEL_MAP, PretrainedConfig
-from ..models.modeling_utils import (WEIGHT_LOADER_MODELS,
-                                     SpeculativeDecodingMode)
+from ..models.modeling_utils import SpeculativeDecodingMode
 from ..plugin import PluginConfig, add_plugin_argument
 
 
@@ -75,20 +75,34 @@ def parse_arguments():
                         type=int,
                         default='1',
                         help='The number of workers for building in parallel')
-    parser.add_argument('--max_batch_size', type=int, default=256)
-    parser.add_argument('--max_input_len', type=int, default=1024)
+    parser.add_argument(
+        '--max_batch_size',
+        type=int,
+        default=256,
+        help="Max number of requests that the engine can handle.")
+    parser.add_argument('--max_input_len',
+                        type=int,
+                        default=1024,
+                        help="Max input length of one request.")
+    parser.add_argument('--max_output_len',
+                        type=int,
+                        default=None,
+                        help="Deprecated. Please use `--max_seq_len` instead.")
     parser.add_argument(
         '--max_seq_len',
         '--max_decoder_seq_len',
         dest='max_seq_len',
         type=int,
         default=None,
-        help=
-        "Max total length of context and generated sequence. If unspecified, will try to deduce from the model config."
-    )
-    parser.add_argument('--max_output_len', type=int, default=None)
+        help="Max total length of one request, including prompt and outputs. "
+        "If unspecified, will try to deduce from the model config.")
     parser.add_argument('--max_beam_width', type=int, default=1)
-    parser.add_argument('--max_num_tokens', type=int, default=8192)
+    parser.add_argument(
+        '--max_num_tokens',
+        type=int,
+        default=8192,
+        help="Max number of batched input tokens after padding is removed "
+        "(triggered by `--remove_input_padding`) in each batch.")
     parser.add_argument(
         '--opt_num_tokens',
         type=int,
@@ -246,13 +260,6 @@ def parse_arguments():
             "If want to get the accepted tokens' logits from target model, please just enable gather_generation_logits"
         )
     return args
-
-
-def preprocess_model_config(model_config, **kwargs):
-    if model_config.architecture in WEIGHT_LOADER_MODELS:
-        model_config.mapping.tp_size = kwargs['tp_size']
-        model_config.mapping.pp_size = kwargs['pp_size']
-        model_config.mapping.world_size = kwargs['tp_size'] * kwargs['pp_size']
 
 
 def build_model(
@@ -428,7 +435,6 @@ def main():
         ckpt_dir = ckpt_dir_or_model_config
 
     model_config = PretrainedConfig.from_json_file(config_path)
-    preprocess_model_config(model_config, **kwargs)
 
     if args.build_config is None:
         if args.multiple_profiles == "enable" and args.opt_num_tokens is not None:
@@ -472,7 +478,6 @@ def main():
                 deduced_max_seq_len = model_config.max_position_embeddings
 
             # Step 2: Scale max_seq_len with rotary scaling
-            rotary_scaling = getattr(model_config, "rotary_scaling", None)
             if rotary_factor != 1:
                 deduced_max_seq_len *= rotary_factor
                 logger.warning(
@@ -485,8 +490,18 @@ def main():
                 f'max_seq_len is not specified, using value {deduced_max_seq_len}'
             )
         else:
-            if not plugin_config.streamingllm and model_config.max_position_embeddings is not None:
-                assert args.max_seq_len <= model_config.max_position_embeddings * rotary_factor, f'max_seq_len {args.max_seq_len} can\'t be larger than max_position_embeddings {model_config.max_position_embeddings} * rotary scaling {rotary_factor}'
+            if not plugin_config.streamingllm and model_config.max_position_embeddings is not None \
+                and model_config.position_embedding_type != PositionEmbeddingType.relative:
+                if args.max_seq_len > model_config.max_position_embeddings * rotary_factor:
+                    logger.warning(
+                        f'max_seq_len {args.max_seq_len} is larger than max_position_embeddings {model_config.max_position_embeddings} * rotary scaling {rotary_factor}, '
+                        'the model accuracy might be affected')
+
+        if args.max_input_len > args.max_seq_len:
+            logger.warning(
+                f'max_input_len is {args.max_input_len} is larger than max_seq_len {args.max_seq_len}, clipping it to max_seq_len'
+            )
+            args.max_input_len = args.max_seq_len
 
         build_config = BuildConfig.from_dict(
             {

@@ -6003,26 +6003,3 @@ def topk(input: Tensor,
     indices = layer.get_output(1)
 
     return _create_tensor(values, layer), _create_tensor(indices, layer)
-
-
-def scatter_nd(input: Tensor, mask: Tensor, source: Tensor) -> Tensor:
-    '''
-    Scatter_nd is a tensor operation that writes or updates values in a tensor based on indices.
-
-    Parameters:
-        input: Tensor
-            The input tensor to be updated
-        mask: Tensor
-            A tensor of indices specifying the locations in data to be updated.
-        source: Tensor
-            A tensor of values to be written or scattered into data.
-    Returns:
-        New tensor with the same shape as the input tensor data,
-        where the values from the source tensor are scattered or written into the output tensor
-        at the locations specified by the mask tensor.
-    '''
-    scatter_layer = default_trtnet().add_scatter(input.trt_tensor,
-                                                 mask.trt_tensor,
-                                                 source.trt_tensor,
-                                                 mode=trt.ScatterMode.ND)
-    return _create_tensor(scatter_layer.get_output(0), scatter_layer)

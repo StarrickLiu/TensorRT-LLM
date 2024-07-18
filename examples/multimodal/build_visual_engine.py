@@ -517,7 +517,12 @@ def build_neva_engine(args):
             vision_x = self.connector(vision_x)
             return vision_x
 
-    encoder = AutoModel.from_pretrained(vision_config["from_pretrained"],
+    vision_path = vision_config["from_pretrained"]
+    joined_path = os.path.join(os.path.dirname(args.model_path),
+                               os.path.basename(vision_path))
+    if os.path.isdir(joined_path):
+        vision_path = joined_path
+    encoder = AutoModel.from_pretrained(vision_path,
                                         torch_dtype=torch.bfloat16,
                                         trust_remote_code=True)
     vision_encoder = encoder.vision_model

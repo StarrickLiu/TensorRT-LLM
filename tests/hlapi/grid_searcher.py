@@ -118,7 +118,6 @@ class GridSearcher:
                 CapacitySchedulerPolicy.GUARANTEED_NO_EVICT,
                 CapacitySchedulerPolicy.MAX_UTILIZATION
             ],
-            enable_chunked_context=[False, True],
         )
         self.space_size = reduce(operator.mul,
                                  [len(v) for v in tunable_options.values()], 1)

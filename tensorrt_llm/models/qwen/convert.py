@@ -1285,6 +1285,7 @@ def quantize(dtype,
              mapping,
              quantization: 'QuantConfig',
              *,
+             device='cuda',
              calib_dataset='cnn_dailymail',
              override_fields={},
              dataset_cache_dir: Optional[str] = None,
@@ -1326,7 +1327,7 @@ def quantize(dtype,
     hf_config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
         model_dir,
-        device_map='auto',
+        device_map='auto' if device != 'cpu' else 'cpu',
         torch_dtype='auto' if not use_smooth_quant else torch.float16,
         trust_remote_code=True).half()
     act_range, qwen_qkv_para, qwen_smoother = smooth_quant(

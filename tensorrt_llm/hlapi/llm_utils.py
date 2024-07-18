@@ -13,6 +13,7 @@ __all__ = [
     'ContextChunkingPolicy',
     'CapacitySchedulerPolicy',
     'BuildConfig',
+    'BuildCacheConfig',
     'QuantConfig',
     'CachedModelLoader',
     'ConfigArbitrateError',
@@ -51,7 +52,7 @@ from ..mapping import Mapping
 from ..models import MODEL_MAP
 from ..models.modeling_utils import PretrainedConfig, QuantAlgo, QuantConfig
 from ..module import Module
-from .build_cache import (BuildCache, CachedStage,
+from .build_cache import (BuildCache, BuildCacheConfig, CachedStage,
                           get_build_cache_config_from_env)
 from .mpi_session import MPINodeState, MpiSession
 from .tokenizer import TokenizerBase, TransformersTokenizer, tokenizer_factory
@@ -210,8 +211,6 @@ class LlmArgs:
     scheduler_config (SchedulerConfig, default=SchedulerConfig()): The scheduler configuration for the model.
         Default is an empty SchedulerConfig instance.
 
-    enable_chunked_context (bool, default=False): Whether to enable chunked context for the model.
-
     normalize_log_probs (bool, default=False): Whether to normalize log probabilities for the model.
 
     iter_stats_max_iterations (int, optional): The maximum number of iterations for iteration statistics.
@@ -223,7 +222,7 @@ class LlmArgs:
     batching_type (BatchingType, optional): The batching type for the model.
         Default is None.
 
-    enable_build_cache (str or bool, optional): Whether to enable build caching for the model.
+    enable_build_cache (bool or BuildCacheConfig, optional): Whether to enable build caching for the model.
         Default is None.
 
     enable_tqdm (bool, default=False): Whether to display a progress bar during model building.
@@ -266,10 +265,6 @@ class LlmArgs:
 
     scheduler_config: SchedulerConfig = field(default_factory=SchedulerConfig)
 
-    # chunked context is disabled by default, and it is recommended to keep it enabled.
-    # The underlying implementation might disable it if it is not supported.
-    enable_chunked_context: bool = False
-
     normalize_log_probs: bool = False
 
     iter_stats_max_iterations: Optional[int] = None
@@ -279,12 +274,16 @@ class LlmArgs:
     batching_type: Optional[BatchingType] = None
 
     # Once set, the model will reuse the build_cache
-    enable_build_cache: Optional[str | bool] = None
+    enable_build_cache: Union[BuildCacheConfig, bool] = False
 
     # Display the model building progress bar
     enable_tqdm: bool = False
 
     def __post_init__(self):
+        # NOTE: this is only for the compatibility with the old API, and will be removed in the future
+        # chunked context is disabled by default, and it is recommended to keep it enabled.
+        # The underlying implementation might disable it if it is not supported.
+        self.enable_chunked_context: bool = False
 
         if self.skip_tokenizer_init:
             self.tokenizer = None
@@ -357,6 +356,13 @@ class LlmArgs:
         self._check_model_or_model_dir()
 
         self._setup_embedding_parallel_mode()
+
+        if self.enable_build_cache:
+            self.enable_build_cache = BuildCacheConfig() if isinstance(
+                self.enable_build_cache, bool) else self.enable_build_cache
+            if not isinstance(self.enable_build_cache, BuildCacheConfig):
+                raise ValueError(
+                    f"Invalid build_cache_config: {self.enable_build_cache}")
 
         if self.is_local_model:
             # Load parallel_config from the engine.
@@ -939,7 +945,6 @@ class ModelLoader:
     def model_format(self) -> _ModelFormatKind:
         return self._model_format
 
-    # TODO[tali]: Replace this with a lower-level API
     @staticmethod
     def save(
         model: _ModelRuntimeContext,
@@ -1131,9 +1136,6 @@ class ModelLoader:
         with open(Path(model_dir) / "config.json", "r") as f:
             engine_config = json.load(f)
 
-        # TODO[chunweiy]: Remove the following if-check after the engine config is unified.
-        if 'build_config' not in engine_config:
-            return None
         build_config = engine_config['build_config']
         build_config.pop("plugin_config")
         return Namespace(**build_config)
@@ -1228,13 +1230,9 @@ class CachedModelLoader:
 
     def _get_engine_cache_stage(self) -> CachedStage:
         '''
-        Get the cache stage fir engine building.
+        Get the cache stage for engine building.
         '''
-        _, _build_cache_root = get_build_cache_config_from_env()
-        build_cache_root = Path(self.llm_args.enable_build_cache if isinstance(
-            self.llm_args.enable_build_cache, str) else _build_cache_root)
-
-        build_cache = BuildCache(build_cache_root)
+        build_cache = BuildCache(self.llm_args.enable_build_cache)
 
         assert self._hf_model_dir is not None, "HF model dir is required for cache key."
         dummy_build_config = CachedModelLoader.get_final_build_config(

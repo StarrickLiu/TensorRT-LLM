@@ -20,7 +20,6 @@ from ...functional import (AllReduceFusionOp, AllReduceFusionParams, Tensor,
                            non_gated_version, recv, send)
 from ...layers import (MOE, Attention, AttentionMaskType, ColumnLinear,
                        Embedding, GatedMLP, PositionEmbeddingType, RmsNorm)
-from ...layers.moe import MoeOOTB
 from ...lora_manager import LoraConfig, use_lora
 from ...mapping import Mapping
 from ...module import Module
@@ -72,7 +71,7 @@ class LLaMADecoderLayer(Module):
         ClsMLP = GatedMLP
         mlp_kwargs = {}
         if config.moe.has_moe():
-            ClsMLP = MoeOOTB
+            ClsMLP = MOE
             mlp_kwargs = {
                 "moe_config": config.moe,
                 "mapping": config.mapping,
@@ -365,12 +364,13 @@ class LLaMAForCausalLM(DecoderModelForCausalLM):
         mapping: Optional[Mapping] = None,
         quant_config: Optional[QuantConfig] = None,
         *,
-        calib_dataset='cnn_dailymail',
-        calib_batches=512,
-        calib_batch_size=1,
-        calib_max_seq_length=512,
-        random_seed=1234,
-        tokenizer_max_seq_length=2048,
+        device: str = 'cuda',
+        calib_dataset: str = 'cnn_dailymail',
+        calib_batches: int = 512,
+        calib_batch_size: int = 1,
+        calib_max_seq_length: int = 512,
+        random_seed: int = 1234,
+        tokenizer_max_seq_length: int = 2048,
         **kwargs,
     ):
         DEFAULT_MODELOPT_FLOW = [
@@ -382,12 +382,14 @@ class LLaMAForCausalLM(DecoderModelForCausalLM):
                                                mapping=mapping,
                                                quant_config=quant_config,
                                                **kwargs)
+
         if quant_config.quant_algo in DEFAULT_MODELOPT_FLOW:
             super().quantize(hf_model_dir,
                              output_dir,
                              dtype=config.dtype,
                              mapping=config.mapping,
                              quant_config=config.quantization,
+                             device=device,
                              calib_dataset=calib_dataset,
                              calib_batches=calib_batches,
                              calib_batch_size=calib_batch_size,
@@ -409,6 +411,7 @@ class LLaMAForCausalLM(DecoderModelForCausalLM):
             convert.quantize(hf_model_dir,
                              output_dir,
                              config=config,
+                             device=device,
                              calib_dataset=calib_dataset)
 
     def use_lora(self, lora_config: LoraConfig):

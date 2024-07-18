@@ -328,7 +328,6 @@ def convert_and_save_hf(args):
 
     if args.smoothquant is not None or args.int8_kv_cache:
         assert not args.load_by_shard, "When using quantization, TRT-LLM needs to load the whole HF model, thus load by shard not supported"
-        assert not args.load_model_on_cpu, "When using quantization, TRT-LLM needs to load the model to GPU"
         mapping = Mapping(
             world_size=world_size,
             rank=-1,  #intentinoally make -1 to avoid mistake
@@ -337,13 +336,15 @@ def convert_and_save_hf(args):
             moe_tp_size=args.moe_tp_size,
             moe_ep_size=args.moe_ep_size)
         # TODO: support moe quantization for tp + ep
-        LLaMAForCausalLM.quantize(args.model_dir,
-                                  args.output_dir,
-                                  dtype=args.dtype,
-                                  mapping=mapping,
-                                  quant_config=quant_config,
-                                  calib_dataset=args.calib_dataset,
-                                  **override_fields)
+        LLaMAForCausalLM.quantize(
+            args.model_dir,
+            args.output_dir,
+            dtype=args.dtype,
+            mapping=mapping,
+            quant_config=quant_config,
+            device='cpu' if args.load_model_on_cpu else 'cuda',
+            calib_dataset=args.calib_dataset,
+            **override_fields)
     else:
         # When not loading by shard, preload one complete model and then slice per rank weights from this
         # this saves the disk reloading time

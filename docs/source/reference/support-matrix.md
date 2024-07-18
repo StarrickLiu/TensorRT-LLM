@@ -83,7 +83,7 @@ The following table shows the supported software for TensorRT-LLM.
         - [mT5](https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/enc_dec)
         - [OPT](https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/opt)
         - [Phi-1.5/Phi-2/Phi-3](https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/phi)
-        - [Qwen](https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/qwen)
+        - [Qwen/Qwen1.5](https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/qwen)
         - [Qwen-VL](https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/qwenvl)
         - [RecurrentGemma](https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/recurrentgemma)
         - [Replit Code](https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/mpt)

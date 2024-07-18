@@ -79,6 +79,7 @@ class GPTBenchmark(BaseBenchmark):
                 self.weights_size_approx = len(engine_buffer)
         else:
             self.build_config = get_build_config(args.model, return_dict=False)
+
             for key, value in asdict(self.build_config).items():
                 setattr(self, key, value)
             if args.force_num_layer_1:
